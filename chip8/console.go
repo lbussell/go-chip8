@@ -3,6 +3,7 @@ package chip8
 import (
 	"fmt"
 	"io/ioutil"
+	"math/rand"
 )
 
 const (
@@ -37,7 +38,7 @@ type CPU struct {
 func InitConsole() *Console {
 	console := &Console{}
 	console.cpu.pc = romOffset // starting point for the program
-	console.cpu.sp = stackOffset
+	console.cpu.sp = 0         // faking the stack
 	console.ram = make([]byte, 4096)
 	copy(console.ram[fontOffset:], font)
 	return console
@@ -80,6 +81,10 @@ func (console *Console) EmulateCycle() {
 				}
 			}
 			console.cpu.pc += 2
+		case 0x00EE: // return from subroutine
+			console.cpu.pc = console.cpu.stack[console.cpu.sp]
+			console.cpu.sp--
+			console.cpu.pc += 2
 		default:
 			noop(opcode)
 		}
@@ -88,43 +93,97 @@ func (console *Console) EmulateCycle() {
 		console.cpu.pc = nnn
 		break
 	case 0x2000: // 2NNN - call address
-		noop(opcode)
+		console.cpu.sp++
+		console.cpu.stack[console.cpu.sp] = console.cpu.pc
+		console.cpu.pc = nnn
 		break
 	case 0x3000: // 3XKK - skip next instruction if vx = kk
-		noop(opcode)
+		if console.cpu.v[x] == kk {
+			console.cpu.pc += 2
+		}
+		console.cpu.pc += 2
 		break
 	case 0x4000: // 4XKK - skip next instruction if vx != kk
-		noop(opcode)
+		if console.cpu.v[x] != kk {
+			console.cpu.pc += 2
+		}
+		console.cpu.pc += 2
 		break
 	case 0x5000: // 5XY0 - skip next instruction if vx = vy
-		noop(opcode)
+		if console.cpu.v[x] == console.cpu.v[y] {
+			console.cpu.pc += 2
+		}
+		console.cpu.pc += 2
 		break
-	case 0x6000: // 6XKK - set vx = kk TODO
+	case 0x6000: // 6XKK - set vx = kk
 		console.cpu.v[x] = kk
 		console.cpu.pc += 2
 		break
-	case 0x7000: // 7XKK - set vx = vx + kk TODO
+	case 0x7000: // 7XKK - set vx = vx + kk
 		console.cpu.v[x] = console.cpu.v[x] + kk
 		console.cpu.pc += 2
 		break
 	case 0x8000: // lots of instructions
-		noop(opcode)
+		switch opcode & 0x000F {
+		case 0x0: // LD vx, vy
+			console.cpu.v[x] = console.cpu.v[y]
+			break
+		case 0x1:
+			console.cpu.v[x] = console.cpu.v[x] | console.cpu.v[y]
+			break
+		case 0x2:
+			console.cpu.v[x] = console.cpu.v[x] & console.cpu.v[y]
+			break
+		case 0x3:
+			console.cpu.v[x] = console.cpu.v[x] ^ console.cpu.v[y]
+			break
+		case 0x4:
+			result := uint16(console.cpu.v[x]) + uint16(console.cpu.v[y])
+			if result > 255 {
+				console.cpu.v[0xF] = 1
+			}
+			console.cpu.v[x] = byte(result & 0xFF)
+			break
+		case 0x5:
+			if console.cpu.v[x] > console.cpu.v[y] {
+				console.cpu.v[0xF] = 1
+			}
+			console.cpu.v[x] = console.cpu.v[x] - console.cpu.v[y]
+			break
+		case 0x6:
+			if console.cpu.v[x]&0x1 == 1 {
+				console.cpu.v[0xF] = 1
+			} else {
+				console.cpu.v[0xF] = 0
+			}
+			console.cpu.v[x] = console.cpu.v[x] / 2
+			break
+		default:
+			noop(opcode)
+			break
+		}
+		console.cpu.pc += 2
 		break
 	case 0x9000: // 9XY0 - skip next instruction if vx != vy
-		noop(opcode)
+		if console.cpu.v[x] != console.cpu.v[y] {
+			console.cpu.pc += 2
+		}
+		console.cpu.pc += 2
 		break
-	case 0xA000: // ANNN - set i = nnn TODO
-		console.cpu.i = opcode & 0x0FFF
+	case 0xA000: // ANNN - set i = nnn
+		console.cpu.i = nnn
 		console.cpu.pc += 2
 		break
 	case 0xB000: // BNNN - jump to location nnn + v0
-		noop(opcode)
+		console.cpu.pc = nnn + uint16(console.cpu.v[0])
+		console.cpu.pc += 2
 		break
 	case 0xC000: // CXKK - set vx = random byte & kk
-		noop(opcode)
+		console.cpu.v[x] = byte(rand.Intn(255))
+		console.cpu.pc += 2
 		break
 	case 0xD000: // DXYN - Display n-byte sprite starting at memory location i
-		// at (vx, vy), set vf = collision TODO
+		// at (vx, vy), set vf = collision
 		sWidth := byte(8)                // all sprites are 8 pixels wide
 		sHeight := byte(opcode & 0x000F) // n bytes means n pixels tall
 
@@ -150,12 +209,43 @@ func (console *Console) EmulateCycle() {
 		break
 	case 0xE000: // read input
 		noop(opcode)
+		console.cpu.pc += 2
 		break
 	case 0xF000: // lots of instructions
-		noop(opcode)
+		switch opcode & 0x00FF {
+		case 0x07:
+			console.cpu.v[x] = console.cpu.dt
+			break
+		case 0x15:
+			console.cpu.dt = console.cpu.v[x]
+			break
+		case 0x18:
+			console.cpu.st = console.cpu.v[x]
+			break
+		case 0x1E:
+			console.cpu.i += uint16(console.cpu.v[x])
+			break
+		case 0x29:
+		case 0x33: // binary coded decimal conversion
+			vx := console.cpu.v[x]
+			hundreds := vx / 100
+			tens := (vx / 10) % 10
+			ones := (vx % 100) % 10
+			console.ram[console.cpu.i] = hundreds
+			console.ram[console.cpu.i+1] = tens
+			console.ram[console.cpu.i+2] = ones
+			break
+		case 0x55:
+		case 0x65:
+		case 0x0A: // wait for keypress
+		default:
+			noop(opcode)
+		}
+		console.cpu.pc += 2
 		break
 	default:
 		noop(opcode)
+		console.cpu.pc += 2
 	}
 	// execute opcode
 	// update timers
